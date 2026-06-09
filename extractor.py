@@ -242,126 +242,75 @@ class PayPalChainExtractor:
         co_data = checkout_resp.json() if checkout_resp.status_code == 200 else {}
         self.log("info", f"Checkout 完整响应: {json.dumps(co_data, ensure_ascii=False)[:500]}")
 
-        # 提取 cs_live
-        cs_live = ""
-        if isinstance(co_data, dict):
-            cs_live = str(co_data.get("checkout_session_id") or co_data.get("cs_live", ""))
-            if not cs_live:
-                url = str(co_data.get("url", ""))
-                if url:
-                    m = re.search(r"cs_live_[a-zA-Z0-9]+", url)
-                    if m:
-                        cs_live = m.group(0)
+        # 提取关键参数
+        cs_live = str(co_data.get("checkout_session_id", ""))
+        publishable_key = str(co_data.get("publishable_key", ""))  # 注意拼写是 publishable
+        processor_entity = str(co_data.get("processor_entity", "openai_llc"))
+        checkout_ui_mode = str(co_data.get("checkout_ui_mode", ""))
 
         if not cs_live:
-            self.log("warn", f"Checkout 响应: {json.dumps(co_data, ensure_ascii=False)[:300]}")
+            self.log("warn", f"未找到 checkout_session_id")
             raise RuntimeError("未提取到 cs_live checkout session ID")
 
         self.log("ok", f"cs_live: {cs_live[:40]}...")
-        return cs_live, access_token, session
+        self.log("info", f"publishable_key: {publishable_key[:30] if publishable_key else 'NOT FOUND'}...")
+        self.log("info", f"processor_entity: {processor_entity}")
+        self.log("info", f"checkout_ui_mode: {checkout_ui_mode}")
+        return cs_live, access_token, session, publishable_key, processor_entity
 
     # ═══════════════════════════════════════════
     # 阶段2: Stripe/PayPal (US 代理)
     # ═══════════════════════════════════════════
-    def step2_stripe_provider(self, cs_live: str, access_token: str) -> dict[str, Any]:
+    def step2_stripe_provider(self, cs_live: str, access_token: str, publishable_key: str = "") -> dict[str, Any]:
         self.log("info", "══════ 阶段2: Stripe/PayPal (US 代理) ══════")
         self.log("info", f"代理: {self._mask(self.us_proxy)}")
         self.log("info", f"Billing: US / {self.billing['city']} / {self.billing['state']}")
+        self.log("info", f"publishable_key: {publishable_key[:30] if publishable_key else 'NOT PROVIDED'}...")
         session = self._make_session(self.us_proxy)
 
-        # 2a. 访问 Stripe checkout — 尝试多种 URL 模式
-        stripe_urls = [
-            f"https://checkout.stripe.com/c/pay/{cs_live}",
-            f"https://checkout.stripe.com/pay/{cs_live}",
-            f"https://api.stripe.com/v1/checkout/sessions/{cs_live}",
-        ]
         html = ""
         final_url = ""
-        pub_key = ""
+        pub_key = publishable_key  # 优先使用 checkout 响应中的 pk
         si_secret = ""
 
-        for stripe_url in stripe_urls:
-            try:
-                self.log("info", f"尝试: {stripe_url[:70]}...")
-                resp = session.get(
-                    stripe_url,
-                    headers={
-                        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                        "Upgrade-Insecure-Requests": "1",
-                        "Origin": "https://checkout.stripe.com",
-                        "Referer": "https://checkout.stripe.com/",
-                    },
-                    allow_redirects=True,
-                    timeout=30,
-                )
-                final_url = str(resp.url)
-                html = resp.text or ""
-                self.log("info", f"  -> HTTP {resp.status_code} final: {final_url[:80]}")
+        # 2a. 访问 Stripe checkout 页面提取 setup_intent client_secret
+        stripe_url = f"https://checkout.stripe.com/c/pay/{cs_live}"
+        self.log("info", f"访问 Stripe: {stripe_url[:70]}...")
+        try:
+            resp = session.get(
+                stripe_url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+                allow_redirects=True,
+                timeout=30,
+            )
+            final_url = str(resp.url)
+            html = resp.text or ""
+            self.log("info", f"Stripe 页面: HTTP {resp.status_code}")
 
-                # 搜索 pub_key
-                for pattern in [
-                    r'pk_live_[a-zA-Z0-9]+',
-                    r'publishableKey["\']?\s*[:=]\s*["\'](pk_live_[a-zA-Z0-9]+)',
-                ]:
-                    m = re.search(pattern, html)
-                    if m:
-                        pub_key = m.group(1) if m.lastindex else m.group(0)
-                        break
-
-                # 搜索 setup_intent client_secret
-                for pattern in [
-                    r"setup_intent_client_secret['\"]?\s*[:=]\s*['\"]([^'\"]+)",
-                    r'clientSecret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
-                    r'"client_secret"\s*:\s*"([^"]+)"',
-                    r'secret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
-                ]:
-                    m = re.search(pattern, html)
-                    if m:
-                        si_secret = m.group(1) if m.lastindex else m.group(0)
-                        break
-
-                if pub_key or si_secret:
+            # 搜索 setup_intent client_secret
+            for pattern in [
+                r'"client_secret"\s*:\s*"([^"]+)"',
+                r"setup_intent_client_secret['\"]?\s*[:=]\s*['\"]([^'\"]+)",
+                r'clientSecret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
+                r'"secret"\s*:\s*"(seti_[^"]+)"',
+                r'secret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
+            ]:
+                m = re.search(pattern, html)
+                if m:
+                    si_secret = m.group(1) if m.lastindex else m.group(0)
                     break
-            except Exception as e:
-                self.log("info", f"  -> FAIL: {e}")
-
-        self.log("info", f"Stripe pk: {'FOUND' if pub_key else 'NOT FOUND'} si: {'FOUND' if si_secret else 'NOT FOUND'}")
-
-        # 2b. 也尝试从 ChatGPT 后端获取 Stripe 信息
-        if not pub_key or not si_secret:
-            self.log("info", "尝试从 ChatGPT 后端获取 Stripe 参数...")
-            try:
-                chatgpt_session = self._make_session(self.jp_proxy)
-                chatgpt_headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                    "Origin": CHATGPT_BASE,
-                    "Referer": f"{CHATGPT_BASE}/",
-                    "oai-device-id": self.device_id,
-                }
-                chatgpt_headers.update(self._make_trace_headers())
-
-                # 尝试多个可能的 endpoint
-                for endpoint in [
-                    f"/backend-api/payments/checkout/{cs_live}",
-                    f"/backend-api/payments/checkout/{cs_live}/details",
-                    f"/backend-api/payments/checkout/{cs_live}/stripe",
-                ]:
-                    try:
-                        r = chatgpt_session.get(
-                            f"{CHATGPT_BASE}{endpoint}",
-                            headers=chatgpt_headers,
-                            timeout=30,
-                        )
-                        self.log("info", f"ChatGPT {endpoint}: HTTP {r.status_code}")
-                        if r.status_code == 200:
-                            d = r.json() if isinstance(r.json(), dict) else {}
-                            self.log("info", f"  keys: {list(d.keys())[:10]}")
-                    except Exception:
-                        pass
-                chatgpt_session.close()
-            except Exception as e:
-                self.log("warn", f"ChatGPT Stripe lookup failed: {e}")
+            if si_secret:
+                self.log("info", f"SetupIntent secret: FOUND ({si_secret[:30]}...)")
+            else:
+                self.log("warn", "SetupIntent secret: NOT FOUND in HTML")
+                # Dump relevant snippets
+                for snippet in re.findall(r'setup_intent[^"]*"[^"]*"', html, re.I)[:3]:
+                    self.log("info", f"  snippet: {snippet[:100]}")
+        except Exception as e:
+            self.log("warn", f"Stripe 页面访问失败: {e}")
 
         # 2d. 提取 JSON 数据块 (Stripe 经常把配置放在 script 标签里)
         json_data = {}
@@ -459,8 +408,9 @@ class PayPalChainExtractor:
     # ═══════════════════════════════════════════
     # 阶段3: Approve (JP 代理)
     # ═══════════════════════════════════════════
-    def step3_approve(self, cs_live: str, access_token: str) -> dict[str, Any]:
+    def step3_approve(self, cs_live: str, access_token: str, processor_entity: str = "openai_llc") -> dict[str, Any]:
         self.log("info", "══════ 阶段3: ChatGPT Approve (JP 代理) ══════")
+        self.log("info", f"processor_entity: {processor_entity}")
         session = self._make_session(self.jp_proxy)
 
         headers = {
@@ -473,71 +423,41 @@ class PayPalChainExtractor:
         }
         headers.update(self._make_trace_headers())
 
-        # 3a. 先检查 checkout 状态
-        self.log("info", "检查 checkout 状态...")
-        try:
-            status_resp = session.get(
-                f"{CHATGPT_BASE}/backend-api/payments/checkout/{cs_live}",
-                headers=headers,
-                timeout=30,
-            )
-            status_data = status_resp.json() if status_resp.status_code == 200 else {}
-            self.log("info", f"Checkout 状态: {status_data.get('status', '未知')}")
-            self.log("info", f"完整响应: {json.dumps(status_data, ensure_ascii=False)[:300]}")
-        except Exception as e:
-            self.log("warn", f"状态检查失败: {e}")
+        # 尝试 approve — processor_entity 必须是 'openai_llc' 或 'openai_ie'
+        payloads = [
+            {"checkout_session_id": cs_live, "processor_entity": processor_entity},
+            {"checkout_session_id": cs_live, "processor_entity": "openai_llc"},
+            {"checkout_session_id": cs_live, "processor_entity": "openai_ie"},
+        ]
 
-        # 3b. 先获取 checkout 详情以拿到 processor_entity
-        processor_entity = ""
-        try:
-            detail_resp = session.get(
-                f"{CHATGPT_BASE}/backend-api/payments/checkout/{cs_live}",
-                headers=headers,
-                timeout=30,
-            )
-            detail_data = detail_resp.json() if detail_resp.status_code == 200 else {}
-            processor_entity = detail_data.get("processor_entity", detail_data.get("processor", ""))
-            if not processor_entity:
-                # 尝试从不同字段推断
-                for key in ("setup_intent_id", "payment_intent_id", "stripe_id", "processor_id"):
-                    if detail_data.get(key):
-                        processor_entity = detail_data[key]
-                        break
-            self.log("info", f"processor_entity: {processor_entity or 'NOT FOUND'}")
-            self.log("info", f"checkout detail keys: {list(detail_data.keys())[:10]}")
-        except Exception as e:
-            self.log("warn", f"获取 checkout 详情失败: {e}")
-
-        # 3c. 尝试不同参数组合 approve
-        approve_payloads = []
-        if processor_entity:
-            approve_payloads.append({"checkout_session_id": cs_live, "processor_entity": processor_entity})
-        approve_payloads.append({"checkout_session_id": cs_live, "processor_entity": "stripe"})
-        approve_payloads.append({"checkout_session_id": cs_live, "processor_entity": cs_live})
-        approve_payloads.append({"checkout_session_id": cs_live, "csrf": ""})
-
-        for payload in approve_payloads:
-            for attempt in range(1, 3):
-                self.log("info", f"Approve {payload.get('processor_entity','?'):20} 尝试 {attempt}/2...")
+        for payload in payloads:
+            for attempt in range(1, 4):
+                pe = payload.get("processor_entity", "?")
+                self.log("info", f"Approve processor_entity={pe} 尝试 {attempt}/3...")
                 resp = session.post(
                     f"{CHATGPT_BASE}/backend-api/payments/checkout/approve",
                     json=payload,
                     headers=headers,
                     timeout=30,
                 )
-                resp_text = resp.text[:300]
-                self.log("info", f"Approve: HTTP {resp.status_code} | {resp_text}")
+                resp_text = resp.text[:500]
+                self.log("info", f"Approve: HTTP {resp.status_code}")
+                self.log("info", f"  body: {resp_text}")
                 try:
                     data = resp.json()
                     result = str(data.get("result", "") if isinstance(data, dict) else "")
                     if result == "approved":
-                        self.log("ok", f"Approve 成功! payload={payload}")
+                        self.log("ok", f"Approve 成功!")
                         return {"ok": True, "data": data}
-                    for key in ("return_url", "url", "redirect_url", "paypal_url"):
+                    for key in ("return_url", "url", "redirect_url", "paypal_url", "next_url"):
                         val = data.get(key, "") if isinstance(data, dict) else ""
                         if val:
                             self.log("ok", f"获取到 URL: {val[:120]}")
                             return {"ok": True, "data": data, "return_url": val}
+                    # 如果是 422 enum 错误，跳过这个 payload
+                    if resp.status_code == 422 and "enum" in resp_text:
+                        self.log("info", f"  processor_entity={pe} 不支持，跳过")
+                        break
                 except Exception:
                     pass
                 time.sleep(1)
@@ -596,16 +516,16 @@ class PayPalChainExtractor:
     def run(self, access_token: str) -> dict[str, Any]:
         results: dict[str, Any] = {"stages": {}, "success": False}
         try:
-            cs_live, at, _ = self.step1_create_checkout(access_token)
-            results["stages"]["checkout"] = {"cs_live": cs_live}
+            cs_live, at, _, pub_key, processor_entity = self.step1_create_checkout(access_token)
+            results["stages"]["checkout"] = {"cs_live": cs_live, "pub_key": pub_key[:30]+"...", "processor_entity": processor_entity}
 
-            provider = self.step2_stripe_provider(cs_live, at)
+            provider = self.step2_stripe_provider(cs_live, at, publishable_key=pub_key)
             results["stages"]["provider"] = provider
 
             # 如果阶段2直接返回了 PayPal redirect URL，优先提取
             paypal_url = provider.get("paypal_url", "")
 
-            approve = self.step3_approve(cs_live, at)
+            approve = self.step3_approve(cs_live, at, processor_entity=processor_entity)
             results["stages"]["approve"] = approve
             # 检查 approve 是否直接返回了 URL
             if not paypal_url and approve.get("return_url"):
