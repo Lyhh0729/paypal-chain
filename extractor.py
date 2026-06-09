@@ -265,77 +265,68 @@ class PayPalChainExtractor:
         self.log("info", "══════ 阶段2: Stripe/PayPal (US 代理) ══════")
         self.log("info", f"代理: {self._mask(self.us_proxy)}")
         self.log("info", f"Billing: US / {self.billing['city']} / {self.billing['state']}")
+        session = self._make_session(self.us_proxy)
 
-        # 策略：优先通过 ChatGPT 后端 API 设置 provider（不直接爬 Stripe SPA 页面）
-        session = self._make_session(self.jp_proxy)  # ChatGPT API 用 JP
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Origin": CHATGPT_BASE,
-            "Referer": f"{CHATGPT_BASE}/",
-            "oai-device-id": self.device_id,
+        if not publishable_key:
+            self.log("error", "缺少 publishable_key，无法调用 Stripe API")
+            return {"status": "no_pk"}
+
+        stripe_headers = {
+            "Authorization": f"Bearer {publishable_key}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://checkout.stripe.com",
+            "Referer": "https://checkout.stripe.com/",
         }
-        headers.update(self._make_trace_headers())
 
-        # 2a. 尝试 ChatGPT 后端 provider 设置 API
-        provider_endpoints = [
-            {
-                "url": f"{CHATGPT_BASE}/backend-api/payments/checkout/{cs_live}/provider",
-                "method": "POST",
-                "body": {"provider": "paypal", "billing_address": self.billing},
-            },
-            {
-                "url": f"{CHATGPT_BASE}/backend-api/payments/checkout/{cs_live}/provider",
-                "method": "POST",
-                "body": {"type": "paypal"},
-            },
-            {
-                "url": f"{CHATGPT_BASE}/backend-api/payments/stripe/setup_intent",
-                "method": "POST",
-                "body": {"checkout_session_id": cs_live, "payment_method_type": "paypal"},
-            },
-            {
-                "url": f"{CHATGPT_BASE}/backend-api/payments/provider",
-                "method": "POST",
-                "body": {"checkout_session_id": cs_live, "type": "paypal"},
-            },
-        ]
+        # 2a. 尝试用 Stripe API 获取 checkout session 里的 setup_intent
+        self.log("info", "获取 Stripe checkout session 信息...")
+        setup_intent_id = ""
+        client_secret = ""
 
-        provider_result = {}
-        for ep in provider_endpoints:
+        # 尝试 Stripe 公开 API
+        for endpoint in [
+            f"https://api.stripe.com/v1/checkout/sessions/{cs_live}/elements",
+            f"https://api.stripe.com/v1/checkout/sessions/{cs_live}",
+        ]:
             try:
-                self.log("info", f"尝试: {ep['method']} {ep['url'][:60]}...")
-                if ep["method"] == "POST":
-                    r = session.post(ep["url"], json=ep["body"], headers=headers, timeout=30)
-                else:
-                    r = session.get(ep["url"], headers=headers, timeout=30)
-                self.log("info", f"  -> HTTP {r.status_code}")
-                if r.status_code in (200, 201):
+                r = session.get(endpoint, headers={
+                    "Authorization": f"Bearer {publishable_key}",
+                    "Accept": "application/json",
+                    "Origin": "https://checkout.stripe.com",
+                }, timeout=20)
+                self.log("info", f"Stripe API {endpoint.split('/')[-1]}: HTTP {r.status_code}")
+                if r.status_code == 200:
                     try:
                         d = r.json()
-                        self.log("info", f"  response: {json.dumps(d, ensure_ascii=False)[:300]}")
-                        if d.get("result") == "approved" or d.get("status") == "requires_approval":
-                            provider_result = d
+                        # 提取 setup_intent 信息
+                        si = d.get("setup_intent", d.get("setup_intent_id", ""))
+                        if isinstance(si, dict):
+                            setup_intent_id = si.get("id", "")
+                            client_secret = si.get("client_secret", "")
+                        elif isinstance(si, str) and si:
+                            setup_intent_id = si
+                        self.log("info", f"  setup_intent: {setup_intent_id[:30] if setup_intent_id else 'NOT FOUND'}")
+                        if client_secret:
+                            self.log("info", f"  client_secret: FOUND")
                             break
                     except Exception:
                         pass
             except Exception as e:
-                self.log("info", f"  -> FAIL: {e}")
+                self.log("info", f"  FAIL: {str(e)[:80]}")
 
-        # 2b. 如果 ChatGPT 后端 API 不行，尝试 Stripe checkout 页面
-        if not provider_result:
-            self.log("info", "ChatGPT 后端 API 未成功，尝试 Stripe 页面...")
-            us_session = self._make_session(self.us_proxy)
-            stripe_url = f"https://checkout.stripe.com/c/pay/{cs_live}"
+        # 2b. 如果还不行，尝试从 Stripe checkout 页面提取
+        if not client_secret:
+            self.log("info", "从 Stripe 页面提取 setup_intent...")
             try:
-                r = us_session.get(stripe_url, headers={
-                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-                    "Upgrade-Insecure-Requests": "1",
-                }, allow_redirects=True, timeout=30)
+                r = session.get(
+                    f"https://checkout.stripe.com/c/pay/{cs_live}",
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                    allow_redirects=True,
+                    timeout=30,
+                )
                 html = r.text or ""
 
-                # 搜索 setup_intent client_secret - 更广泛的模式
+                # 搜索各种可能的模式
                 for pattern in [
                     r'"client_secret"\s*:\s*"([^"]+)"',
                     r'setup_intent_client_secret["\']?\s*[:=]\s*["\']([^"\']+)',
@@ -344,18 +335,88 @@ class PayPalChainExtractor:
                 ]:
                     m = re.search(pattern, html)
                     if m:
-                        si_secret = m.group(1) if m.lastindex else m.group(0)
+                        client_secret = m.group(1) if m.lastindex else m.group(0)
+                        setup_intent_id = client_secret.split("_secret_")[0]
+                        self.log("info", f"  从HTML提取: si={setup_intent_id[:30]}")
                         break
-                # ... (rest of Stripe page handling same as before)
-            except Exception as e:
-                self.log("warn", f"Stripe 页面: {e}")
-            finally:
-                us_session.close()
 
-        return {
-            "provider_result": provider_result,
-            "status": "requires_approval" if provider_result else "provider_not_set",
-        }
+                # 尝试从 JS bundle 中提取 (更宽松的模式)
+                if not client_secret:
+                    for m in re.finditer(r'"seti_[^"]+_secret_[^"]+"', html):
+                        val = m.group(0).strip('"')
+                        if "_secret_" in val:
+                            client_secret = val
+                            setup_intent_id = val.split("_secret_")[0]
+                            self.log("info", f"  从JS提取: si={setup_intent_id[:30]}")
+                            break
+            except Exception as e:
+                self.log("warn", f"Stripe 页面提取失败: {e}")
+
+        # 2c. 创建 PayPal payment_method
+        payment_method_id = ""
+        if publishable_key and (client_secret or setup_intent_id):
+            self.log("info", "创建 PayPal payment_method...")
+            pm_data = {
+                "type": "paypal",
+                "billing_details[address][country]": self.billing["country"],
+                "billing_details[address][line1]": self.billing["line1"],
+                "billing_details[address][city]": self.billing["city"],
+                "billing_details[address][state]": self.billing["state"],
+                "billing_details[address][postal_code]": self.billing["postal_code"],
+            }
+            pm_resp = session.post(
+                "https://api.stripe.com/v1/payment_methods",
+                data=pm_data,
+                headers=stripe_headers,
+                timeout=30,
+            )
+            self.log("info", f"PaymentMethod: HTTP {pm_resp.status_code}")
+            if pm_resp.status_code == 200:
+                pm = pm_resp.json()
+                payment_method_id = pm.get("id", "")
+                self.log("ok", f"PM ID: {payment_method_id}")
+
+            # 2d. Confirm SetupIntent with payment method
+            if payment_method_id and client_secret:
+                self.log("info", f"Confirm SetupIntent {setup_intent_id[:30]}...")
+                si_id = client_secret.split("_secret_")[0]
+                confirm_resp = session.post(
+                    f"https://api.stripe.com/v1/setup_intents/{si_id}/confirm",
+                    data={
+                        "payment_method": payment_method_id,
+                        "client_secret": client_secret,
+                    },
+                    headers=stripe_headers,
+                    timeout=30,
+                )
+                self.log("info", f"SetupIntent confirm: HTTP {confirm_resp.status_code}")
+                try:
+                    si_data = confirm_resp.json()
+                    si_status = si_data.get("status", "")
+                    self.log("info", f"SI status: {si_status}")
+                    self.log("info", f"SI response: {json.dumps(si_data, ensure_ascii=False)[:400]}")
+
+                    if si_status == "requires_action":
+                        next_action = si_data.get("next_action", {})
+                        redirect = next_action.get("redirect_to_url", {}).get("url", "")
+                        if redirect:
+                            self.log("ok", f"PayPal redirect: {redirect[:150]}")
+                            return {"status": "requires_action", "paypal_url": redirect}
+                    elif si_status == "succeeded":
+                        self.log("ok", "SetupIntent succeeded!")
+                        return {"status": "requires_approval", "setup_intent_id": si_id}
+                    elif si_status == "processing":
+                        self.log("info", "SetupIntent processing...")
+                        return {"status": "processing", "setup_intent_id": si_id}
+                except Exception as e:
+                    self.log("warn", f"Confirm parse error: {e}")
+        else:
+            missing = []
+            if not publishable_key: missing.append("pk")
+            if not client_secret: missing.append("si_secret")
+            self.log("warn", f"缺少参数: {missing}")
+
+        return {"status": "provider_not_set", "payment_method_id": payment_method_id}
 
         # 2d. 提取 JSON 数据块 (Stripe 经常把配置放在 script 标签里)
         json_data = {}
