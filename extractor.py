@@ -271,7 +271,6 @@ class PayPalChainExtractor:
         # 2a. 访问 Stripe checkout 页面
         stripe_url = f"https://checkout.stripe.com/c/pay/{cs_live}"
         self.log("info", f"Stripe checkout: {stripe_url[:70]}...")
-
         resp = session.get(
             stripe_url,
             headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Upgrade-Insecure-Requests": "1"},
@@ -282,33 +281,124 @@ class PayPalChainExtractor:
         html = resp.text or ""
         self.log("info", f"Stripe 页面: HTTP {resp.status_code}")
 
-        # 2b. 提取 Stripe 关键参数
+        # 2b. 提取 Stripe publishable key
         pub_key = ""
-        m = re.search(r'pk_live_[a-zA-Z0-9]+', html)
-        if m:
-            pub_key = m.group(0)
+        for pattern in [
+            r'pk_live_[a-zA-Z0-9]+',
+            r'publishableKey["\']?\s*[:=]\s*["\'](pk_live_[a-zA-Z0-9]+)',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                pub_key = m.group(1) if m.lastindex else m.group(0)
+                break
         self.log("info", f"Stripe pk: {'FOUND' if pub_key else 'NOT FOUND'}")
 
+        # 2c. 提取 setup_intent client_secret
         si_secret = ""
-        m = re.search(r"setup_intent_client_secret['\"]?\s*[:=]\s*['\"]([^'\"]+)", html)
-        if m:
-            si_secret = m.group(1)
-            self.log("info", f"SetupIntent secret: FOUND ({si_secret[:10]}...)")
+        for pattern in [
+            r"setup_intent_client_secret['\"]?\s*[:=]\s*['\"]([^'\"]+)",
+            r'clientSecret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
+            r'"client_secret"\s*:\s*"([^"]+)"',
+            r'secret["\']?\s*[:=]\s*["\'](seti_[^"\']+)',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                si_secret = m.group(1) if m.lastindex else m.group(0)
+                break
+        if si_secret:
+            self.log("info", f"SetupIntent secret: FOUND ({si_secret[:30]}...)")
 
-        # 2c. 模拟 PayPal 支付方式创建
-        self.log("info", "创建 PayPal payment_method (billing=US)...")
-        self.log("info", f"  country={self.billing['country']} city={self.billing['city']} state={self.billing['state']}")
+        # 2d. 提取 JSON 数据块 (Stripe 经常把配置放在 script 标签里)
+        json_data = {}
+        for m in re.finditer(r'\{[^}]+"publishableKey"[^}]+\}', html):
+            try:
+                json_data = json.loads(m.group(0))
+                break
+            except Exception:
+                pass
+        if not json_data:
+            for m in re.finditer(r'window\.__stripeAppData\s*=\s*(\{[^<]+\})', html):
+                try:
+                    json_data = json.loads(m.group(1))
+                    break
+                except Exception:
+                    pass
+        if json_data:
+            if not pub_key:
+                pub_key = json_data.get("publishableKey", "")
+            if not si_secret:
+                si_secret = json_data.get("clientSecret", json_data.get("client_secret", ""))
+            self.log("info", f"JSON data extracted: keys={list(json_data.keys())[:5]}")
 
-        # 尝试从页面提取更多信息
-        checkout_session_match = re.search(r"checkout_session['\"]?\s*[:=]\s*['\"]([^'\"]+)", html)
-        if checkout_session_match:
-            self.log("info", f"CheckoutSession: {checkout_session_match.group(1)[:20]}...")
+        # 2e. 如果有 pub_key 和 si_secret，调用 Stripe API 创建 PayPal payment_method
+        payment_method_id = ""
+        if pub_key and si_secret:
+            self.log("info", "调用 Stripe API: 创建 PayPal payment_method...")
+            stripe_headers = {
+                "Authorization": f"Bearer {pub_key}",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://checkout.stripe.com",
+                "Referer": final_url,
+            }
+            pm_data = {
+                "type": "paypal",
+                "billing_details[address][country]": self.billing["country"],
+                "billing_details[address][line1]": self.billing["line1"],
+                "billing_details[address][city]": self.billing["city"],
+                "billing_details[address][state]": self.billing["state"],
+                "billing_details[address][postal_code]": self.billing["postal_code"],
+            }
+            pm_resp = session.post(
+                "https://api.stripe.com/v1/payment_methods",
+                data=pm_data,
+                headers=stripe_headers,
+                timeout=30,
+            )
+            self.log("info", f"PaymentMethod: HTTP {pm_resp.status_code}")
+            if pm_resp.status_code == 200:
+                pm_json = pm_resp.json()
+                payment_method_id = pm_json.get("id", "")
+                self.log("ok", f"PaymentMethod ID: {payment_method_id}")
+
+            # 2f. 确认 SetupIntent
+            if payment_method_id:
+                self.log("info", "调用 Stripe API: confirm SetupIntent...")
+                si_id = si_secret.split("_secret_")[0]
+                confirm_resp = session.post(
+                    f"https://api.stripe.com/v1/setup_intents/{si_id}/confirm",
+                    data={
+                        "payment_method": payment_method_id,
+                        "client_secret": si_secret,
+                    },
+                    headers=stripe_headers,
+                    timeout=30,
+                )
+                self.log("info", f"SetupIntent confirm: HTTP {confirm_resp.status_code}")
+                try:
+                    si_data = confirm_resp.json()
+                    si_status = si_data.get("status", "")
+                    self.log("info", f"SetupIntent status: {si_status}")
+                    if si_status == "requires_action":
+                        # PayPal redirect needed
+                        next_action = si_data.get("next_action", {})
+                        redirect_url = next_action.get("redirect_to_url", {}).get("url", "")
+                        if redirect_url:
+                            self.log("ok", f"PayPal redirect: {redirect_url[:120]}")
+                            return {"status": "requires_action", "paypal_url": redirect_url, "pub_key": pub_key, "payment_method_id": payment_method_id}
+                except Exception as e:
+                    self.log("warn", f"SetupIntent parse: {e}")
+        else:
+            self.log("warn", f"缺少 Stripe 参数 pk={bool(pub_key)} si={bool(si_secret)}")
+            # Dump relevant HTML parts for debugging
+            snippets = re.findall(r'(?:pk_|publishableKey|setup_intent|client_secret|stripe)[^"]*["\']([^"\']+)["\']', html, re.I)
+            if snippets:
+                self.log("info", f"HTML hints: {snippets[:5]}")
 
         return {
             "final_url": final_url,
             "pub_key": pub_key,
-            "has_setup_intent": bool(si_secret),
-            "status": "requires_approval",
+            "payment_method_id": payment_method_id,
+            "status": "requires_approval" if payment_method_id else "incomplete",
         }
 
     # ═══════════════════════════════════════════
@@ -328,6 +418,21 @@ class PayPalChainExtractor:
         }
         headers.update(self._make_trace_headers())
 
+        # 3a. 先检查 checkout 状态
+        self.log("info", "检查 checkout 状态...")
+        try:
+            status_resp = session.get(
+                f"{CHATGPT_BASE}/backend-api/payments/checkout/{cs_live}",
+                headers=headers,
+                timeout=30,
+            )
+            status_data = status_resp.json() if status_resp.status_code == 200 else {}
+            self.log("info", f"Checkout 状态: {status_data.get('status', '未知')}")
+            self.log("info", f"完整响应: {json.dumps(status_data, ensure_ascii=False)[:300]}")
+        except Exception as e:
+            self.log("warn", f"状态检查失败: {e}")
+
+        # 3b. 尝试 approve
         for attempt in range(1, 6):
             self.log("info", f"Approve 尝试 {attempt}/5...")
             resp = session.post(
@@ -340,10 +445,17 @@ class PayPalChainExtractor:
             try:
                 data = resp.json()
                 result = str(data.get("result", "") if isinstance(data, dict) else "")
+                body_str = json.dumps(data, ensure_ascii=False)[:300]
                 self.log("info", f"  result: {result}")
+                self.log("info", f"  response: {body_str}")
                 if result == "approved":
                     self.log("ok", "Approve 成功!")
                     return {"ok": True, "data": data}
+                # 检查是否有 PayPal URL 返回
+                for key in ("return_url", "url", "redirect_url", "paypal_url"):
+                    if data.get(key) if isinstance(data, dict) else "":
+                        self.log("ok", f"获取到 URL: {data[key][:120]}")
+                        return {"ok": True, "data": data, "return_url": data[key]}
             except Exception:
                 pass
             time.sleep(2)
@@ -408,15 +520,28 @@ class PayPalChainExtractor:
             provider = self.step2_stripe_provider(cs_live, at)
             results["stages"]["provider"] = provider
 
+            # 如果阶段2直接返回了 PayPal redirect URL，优先提取
+            paypal_url = provider.get("paypal_url", "")
+
             approve = self.step3_approve(cs_live, at)
             results["stages"]["approve"] = approve
+            # 检查 approve 是否直接返回了 URL
+            if not paypal_url and approve.get("return_url"):
+                paypal_url = approve.get("return_url", "")
 
             chain = self.step4_extract_chain(cs_live, at)
             results["stages"]["chain"] = {"paypal_ba": chain}
-            if chain:
+
+            # 合并结果
+            final_chain = chain or paypal_url
+            if final_chain:
                 results["success"] = True
-                results["paypal_ba_chain"] = chain
+                results["paypal_ba_chain"] = final_chain
                 self.log("ok", "========== 全流程完成: PayPal BA 链提取成功! ==========")
+            elif approve.get("ok"):
+                results["success"] = True
+                results["message"] = "Approve 成功，请手动提取链"
+                self.log("ok", "========== 全流程完成: Approve OK ==========")
             else:
                 results["error"] = "未能提取 PayPal BA 链"
                 self.log("error", "全流程完成但未提取到链")
