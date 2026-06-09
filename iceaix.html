@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日区PP无敌协议版</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">重铸PLUS荣光 我辈义不容辞</div>
+  <div class="topbar-tools">
+    <a class="topbar-link" href="https://t.me/IceAi_hub" target="_blank" rel="noopener noreferrer">频道</a>
+    <a class="topbar-link" href="https://t.me/iceaihubplus" target="_blank" rel="noopener noreferrer">群组</a>
+    <a class="topbar-link" href="https://pay.ldxp.cn/shop/iceaix" target="_blank" rel="noopener noreferrer">CDK/接码购买</a>
+    <a class="topbar-link" href="https://t.me/ArcteryxSup" target="_blank" rel="noopener noreferrer">合作私聊 @ArcteryxSup</a>
+    <div class="status" id="status-pill">就绪</div>
+  </div>
+  <div class="stats" id="stats-bar">
+    <span class="stat" title="独立访问 IP 总数"><b id="s-visitors">—</b><i>访问</i></span>
+    <span class="stat" title="提链 (pplink) 成功次数"><b id="s-pplink">—</b><i>提链成功数</i></span>
+    <span class="stat" title="PayPal 注册 + 授权成功次数"><b id="s-signup">—</b><i>开通plus成功数</i></span>
+    <span class="stat" title="网页运行时间"><b id="s-uptime">—</b><i>网页运行时间</i></span>
+    <span class="stat" title="当前进行中的任务数"><b id="s-active-jobs">—</b><i>进行中任务</i></span>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="form-card">
+    <h2>开通plus</h2>
+    <form id="start-form" autocomplete="off" spellcheck="false">
+      <div class="row cdk-grid">
+        <label class="grow cdk-box">
+          <span>付费 CDK <em>内置代理 + 内置接码; 无需自填代理和接码</em></span>
+          <input type="text" id="f-cdk-sale" placeholder="请输入付费 CDK">
+        </label>
+        <label class="grow cdk-box">
+          <span>签到 CDK <em>需自行解决代理和接码; 请确保你的接码号码可用</em></span>
+          <input type="text" id="f-cdk-checkin" placeholder="请输入签到领取的 CDK">
+        </label>
+      </div>
+      <div class="mode-guide" id="mode-guide">
+        当前模式：签到 CDK。需自行提供可用代理、手机号与接码方式。
+      </div>
+      <div class="mode-guide sale hidden" id="sale-thread-guide">
+        付费线程：<b id="sale-thread-usage">0/22</b> · 等待排队：<b id="sale-thread-waiting">0</b>
+      </div>
+      <label>
+        <span>输入 (Token / 链接 / BA-xxx) <em>必填</em></span>
+        <textarea id="f-input" rows="3" required placeholder="支持: ChatGPT JWT / pm-redirects URL / PayPal agreements URL / BA-xxx"></textarea>
+      </label>
+      <label id="proxy-us-field">
+        <span>US 代理 <em>必填; 用于注册账户 + pplink (PM/confirm)</em></span>
+        <div class="proxy-row">
+          <input type="text" id="f-proxy" required placeholder="http://user:pass@host:port 或 socks5://...">
+          <button type="button" class="proxy-test-btn" data-target="f-proxy">测试出口</button>
+        </div>
+        <div class="proxy-result" id="f-proxy-result"></div>
+      </label>
+      <label id="proxy-jp-field">
+        <span>JP 代理 <em>仅当输入是 ChatGPT token 时必填 (pplink checkout/approve)</em></span>
+        <div class="proxy-row">
+          <input type="text" id="f-proxy-jp" placeholder="socks5://user:pass@host:port">
+          <button type="button" class="proxy-test-btn" data-target="f-proxy-jp">测试出口</button>
+        </div>
+        <div class="proxy-result" id="f-proxy-jp-result"></div>
+      </label>
+      <div class="row">
+        <label class="grow" id="phone-field">
+          <span>手机号 <em>必填; 不含国家码</em></span>
+          <input type="text" id="f-phone" required placeholder="例 08012345678">
+        </label>
+        <label class="grow" id="email-field">
+          <span>邮箱 <em>留空随机</em></span>
+          <input type="text" id="f-email" placeholder="可留空">
+        </label>
+      </div>
+      <details class="advanced">
+        <summary>高级选项</summary>
+        <label id="sms-field">
+          <span>SMS 取码 API <em>留空不填则手动 建议手动 未适配市面api</em></span>
+          <input type="text" id="f-sms" placeholder="https://...?order_no=...">
+        </label>
+        <div class="row">
+          <label class="grow">
+            <span>预置 OTP <em>填了则跳过等待</em></span>
+            <input type="text" id="f-otp" placeholder="6 位">
+          </label>
+          <label class="grow">
+            <span>OTP 等待秒</span>
+            <input type="number" id="f-otp-timeout" value="180" min="30" max="600">
+          </label>
+        </div>
+        <div class="row">
+          <label class="grow">
+            <span>pplink 重试次数</span>
+            <input type="number" id="f-pplink-retry" value="3" min="1" max="10">
+          </label>
+        </div>
+      </details>
+      <div class="actions">
+        <button type="submit" id="submit-btn">开始</button>
+        <button type="button" id="reset-btn">重置</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card hidden" id="run-card">
+    <h2>任务执行 <span class="job-id" id="job-id-tag"></span></h2>
+    <div class="otp-panel hidden" id="otp-panel">
+      <div class="otp-msg">需要短信验证码 <span id="otp-phone"></span></div>
+      <form id="otp-form">
+        <input type="text" id="otp-pin" inputmode="numeric" pattern="\d{4,8}"
+               maxlength="8" required placeholder="6 位 OTP">
+        <button type="submit">提交</button>
+      </form>
+    </div>
+    <div class="result-panel hidden" id="result-panel"></div>
+    <div class="log-toolbar">
+      <span class="muted">实时日志</span>
+      <div>
+        <button type="button" id="retry-btn" disabled>重试本任务</button>
+        <label class="checkbox tiny"><input type="checkbox" id="auto-scroll" checked> 自动滚动</label>
+        <button type="button" id="clear-log-btn">清空</button>
+      </div>
+    </div>
+    <div class="muted small retry-hint">重试会复用同一 CDK 和原始 Token/链接；可更换接码号码等参数后重试。</div>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<footer class="muted small">Ice AI X</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

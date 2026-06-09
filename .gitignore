@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+chatgpt_session.json
+*.local.json
+setup.py
+fix_btn.py
+fix_all_js.py
+find_paren.py
+debug_js.py
+zenpic.html

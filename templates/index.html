@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PayPal BA 链提取</title>
+<style>
+:root {
+  --bg: #0e1116; --bg2: #161b22; --bg3: #1c232c; --fg: #e6edf3;
+  --muted: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
+  --err: #f85149; --border: #30363d;
+}
+*{box-sizing:border-box}body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--bg2);flex-wrap:wrap;gap:10px}
+.brand{font-weight:700;font-size:18px;letter-spacing:.5px}
+.stats{display:flex;gap:14px;flex-wrap:wrap}
+.stat{background:var(--bg3);border:1px solid var(--border);padding:4px 10px;border-radius:18px;font-size:12px;display:inline-flex;align-items:baseline;gap:6px}
+.stat b{color:var(--accent);font-weight:600;font-size:13px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.stat i{color:var(--muted);font-style:normal}
+.status{font-size:12px;padding:4px 10px;border-radius:20px;background:var(--bg3);border:1px solid var(--border)}
+.status.running{color:var(--accent);border-color:var(--accent)}
+.status.ok{color:var(--ok);border-color:var(--ok)}
+.status.error{color:var(--err);border-color:var(--err)}
+main{max-width:860px;margin:0 auto;padding:24px 16px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:20px 24px;margin-bottom:18px}
+.card.hidden{display:none}
+h2{font-size:17px;margin:0 0 16px;display:flex;align-items:center;gap:8px}
+label{display:block;margin-bottom:12px}
+label span{display:block;font-size:13px;margin-bottom:4px;color:var(--muted)}
+label span em{color:var(--warn);font-style:normal;font-size:11px;margin-left:6px}
+input,textarea,select{width:100%;padding:9px 12px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;font:13px/1.4 ui-monospace,monospace;outline:none}
+input:focus,textarea:focus{border-color:var(--accent)}
+.row{display:flex;gap:10px}
+.row .grow{flex:1}
+.proxy-row{display:flex;gap:8px}
+.proxy-row input{flex:1}
+.proxy-row button{white-space:nowrap;padding:8px 14px;background:var(--bg3);color:var(--accent);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px}
+.proxy-row button:hover{border-color:var(--accent)}
+.proxy-result{font-size:12px;margin-top:3px;min-height:18px}
+.proxy-result.ok{color:var(--ok)}.proxy-result.err{color:var(--err)}.proxy-result.busy{color:var(--accent)}
+.actions{display:flex;gap:10px;margin-top:16px}
+.actions button{padding:10px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;border:none}
+#submit-btn{background:var(--accent);color:#fff}
+#submit-btn:hover{filter:brightness(1.15)}
+#submit-btn:disabled{opacity:.5}
+#reset-btn{background:var(--bg3);color:var(--fg);border:1px solid var(--border)}
+#reset-btn:hover{border-color:var(--accent)}
+.result-panel{margin-bottom:14px;padding:14px;border-radius:8px;background:var(--bg3)}
+.result-panel.error{border-left:3px solid var(--err)}
+.result-panel .k{color:var(--muted);font-size:12px}.result-panel .v{color:var(--fg);font-size:13px;word-break:break-all}
+.otp-panel{margin-bottom:14px;padding:16px;border-radius:8px;background:var(--bg3);border:2px solid var(--warn);text-align:center}
+.otp-panel.hidden{display:none}
+.otp-msg{margin-bottom:10px;color:var(--warn)}
+.otp-panel input{padding:10px;font-size:18px;text-align:center;width:120px;margin-right:8px}
+.otp-panel button{padding:10px 20px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer}
+.log-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px}
+.log-toolbar button{padding:6px 14px;background:var(--bg3);color:var(--fg);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:12px}
+.log-toolbar button:hover{border-color:var(--accent)}
+.log-toolbar button:disabled{opacity:.4}
+.log{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;height:380px;overflow-y:auto;font:12px/1.6 ui-monospace,SFMono,monospace;white-space:pre-wrap;word-break:break-all}
+.log .ts{color:var(--muted);margin-right:8px;font-size:11px}
+.log .err{color:var(--err)}.log .warn{color:var(--warn)}.log .ok{color:var(--ok)}
+.muted{color:var(--muted)}.small{font-size:11px}
+.checkbox.tiny{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}
+.checkbox.tiny input{width:auto}
+.job-id{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+footer{text-align:center;padding:20px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">PayPal BA 链提取</div>
+  <div class="stats">
+    <span class="stat" title="独立访问 IP 总数"><b id="s-visitors">—</b><i>访问</i></span>
+    <span class="stat" title="提链成功次数"><b id="s-pplink">—</b><i>提链成功</i></span>
+    <span class="stat" title="当前进行中的任务数"><b id="s-active-jobs">—</b><i>进行中</i></span>
+    <span class="stat" title="网页运行时间"><b id="s-uptime">—</b><i>运行时间</i></span>
+  </div>
+  <div class="status" id="status-pill">就绪</div>
+</header>
+
+<main>
+  <!-- 表单卡片 -->
+  <section class="card" id="form-card">
+    <h2>开始提链</h2>
+    <form id="start-form" autocomplete="off" spellcheck="false">
+      <label>
+        <span>ChatGPT Access Token / JWT <em>必填</em></span>
+        <textarea id="f-input" rows="3" required placeholder="粘贴 ChatGPT 的 access_token 或 JWT Token"></textarea>
+      </label>
+      <div class="row">
+        <label class="grow">
+          <span>US 代理 <em>阶段2 Stripe/PayPal 使用</em></span>
+          <div class="proxy-row">
+            <input type="text" id="f-proxy" placeholder="http://user:pass@host:port">
+            <button type="button" class="proxy-test-btn" data-target="f-proxy">测试出口</button>
+          </div>
+          <div class="proxy-result" id="f-proxy-result"></div>
+        </label>
+        <label class="grow">
+          <span>JP 代理 <em>阶段1/3 ChatGPT checkout + approve</em></span>
+          <div class="proxy-row">
+            <input type="text" id="f-proxy-jp" placeholder="http://user:pass@host:port">
+            <button type="button" class="proxy-test-btn" data-target="f-proxy-jp">测试出口</button>
+          </div>
+          <div class="proxy-result" id="f-proxy-jp-result"></div>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" id="submit-btn">开始提链</button>
+        <button type="button" id="reset-btn">重置</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 运行卡片 -->
+  <section class="card hidden" id="run-card">
+    <h2>任务执行 <span class="job-id" id="job-id-tag"></span></h2>
+    <div class="otp-panel hidden" id="otp-panel">
+      <div class="otp-msg">需要短信验证码 <span id="otp-phone"></span></div>
+      <form id="otp-form">
+        <input type="text" id="otp-pin" inputmode="numeric" pattern="\d{4,8}" maxlength="8" required placeholder="6 位 OTP">
+        <button type="submit">提交</button>
+      </form>
+    </div>
+    <div class="result-panel hidden" id="result-panel"></div>
+    <div class="log-toolbar">
+      <span class="muted small">实时日志 — 4个阶段: ①创建Checkout(JP) → ②Stripe/PayPal(US) → ③Approve(JP) → ④提取BA链</span>
+      <div>
+        <button type="button" id="retry-btn" disabled>重试</button>
+        <label class="checkbox tiny"><input type="checkbox" id="auto-scroll" checked>自动滚动</label>
+        <button type="button" id="clear-log-btn">清空</button>
+      </div>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<footer class="muted small">PayPal BA Chain Extractor — 3阶段代理切换: JP → US → JP</footer>
+
+<script>
+'use strict';
+(function(){
+const $=id=>document.getElementById(id);
+const els={
+  statusPill:$('status-pill'),formCard:$('form-card'),runCard:$('run-card'),
+  form:$('start-form'),submitBtn:$('submit-btn'),resetBtn:$('reset-btn'),
+  log:$('log'),autoScroll:$('auto-scroll'),clearLogBtn:$('clear-log-btn'),
+  retryBtn:$('retry-btn'),otpPanel:$('otp-panel'),otpPhone:$('otp-phone'),
+  otpForm:$('otp-form'),otpInput:$('otp-pin'),resultPanel:$('result-panel'),
+  jobIdTag:$('job-id-tag'),fInput:$('f-input'),fProxy:$('f-proxy'),
+  fProxyJP:$('f-proxy-jp'),proxyBtns:document.querySelectorAll('.proxy-test-btn'),
+};
+
+const FORM_KEY='ppba.form';
+let state={jobId:null,es:null,config:{},uptimeSec:null,uptimeTimer:null,lastBody:null,lastResult:null,jobRunning:false};
+
+function setStatus(text,kind){
+  els.statusPill.textContent=text;
+  els.statusPill.className='status '+(kind||'');
+}
+
+function appendLog(line,cls){
+  const wrap=document.createElement('div');
+  if(cls)wrap.className=cls;
+  const now=new Date();
+  const hh=String(now.getHours()).padStart(2,'0');
+  const mm=String(now.getMinutes()).padStart(2,'0');
+  const ss=String(now.getSeconds()).padStart(2,'0');
+  const ts=document.createElement('span');
+  ts.className='ts';ts.textContent=hh+':'+mm+':'+ss;
+  wrap.appendChild(ts);
+  wrap.appendChild(document.createTextNode(line));
+  els.log.appendChild(wrap);
+  if(els.autoScroll.checked)els.log.scrollTop=els.log.scrollHeight;
+}
+
+function classifyLog(msg){
+  if(/❌|失败|error|FAIL|异常/i.test(msg))return'err';
+  if(/⚠|warn|skip/i.test(msg))return'warn';
+  if(/✅|成功|ok|done|🎉/i.test(msg))return'ok';
+  return'';
+}
+
+function formatUptime(total){
+  if(typeof total!=='number'||!Number.isFinite(total)||total<0)return'—';
+  const sec=Math.floor(total%60),min=Math.floor((total/60)%60),hour=Math.floor(total/3600);
+  return [hour,min,sec].map(n=>String(n).padStart(2,'0')).join(':');
+}
+
+function renderUptime(){$('s-uptime').textContent=formatUptime(state.uptimeSec);}
+function startUptimeTicker(){
+  if(state.uptimeTimer)return;
+  state.uptimeTimer=setInterval(()=>{
+    if(typeof state.uptimeSec!=='number'||!Number.isFinite(state.uptimeSec))return;
+    state.uptimeSec+=1;renderUptime();
+  },1000);
+}
+
+async function api(path,opts){
+  opts=opts||{};
+  opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});
+  const resp=await fetch(path,opts);
+  if(!resp.ok){
+    let detail='';
+    try{detail=(await resp.json()).detail;}catch(_){}
+    throw new Error(resp.status+' '+(detail||resp.statusText));
+  }
+  return resp.json();
+}
+
+function persistForm(){
+  try{
+    localStorage.setItem(FORM_KEY,JSON.stringify({
+      proxy:els.fProxy.value,proxy_jp:els.fProxyJP.value
+    }));
+  }catch(_){}
+}
+function restoreForm(){
+  try{
+    const raw=localStorage.getItem(FORM_KEY);
+    if(raw){
+      const s=JSON.parse(raw);
+      if(s.proxy!=null)els.fProxy.value=s.proxy;
+      if(s.proxy_jp!=null)els.fProxyJP.value=s.proxy_jp;
+    }
+  }catch(_){}
+}
+
+function showRunCard(jobId){
+  els.formCard.classList.add('hidden');
+  els.runCard.classList.remove('hidden');
+  els.jobIdTag.textContent='#'+jobId.slice(0,8);
+  els.resultPanel.classList.add('hidden');
+  els.otpPanel.classList.add('hidden');
+  els.log.innerHTML='';
+  els.retryBtn.disabled=true;
+}
+
+function syncRetryButton(){
+  els.retryBtn.disabled=!state.lastBody||state.jobRunning||!state.lastResult||!!state.lastResult.success;
+}
+
+function showResult(result){
+  const panel=els.resultPanel;
+  panel.innerHTML='';
+  panel.classList.remove('hidden','error');
+  if(!result.success){
+    panel.classList.add('error');
+    panel.appendChild(row('状态','失败'));
+    panel.appendChild(row('错误',result.error||'-'));
+    return;
+  }
+  panel.classList.add('ok');
+  panel.appendChild(row('状态','成功 - PayPal BA 链已提取'));
+  if(result.paypal_ba_chain)panel.appendChild(row('PayPal BA 链',result.paypal_ba_chain));
+  if(result.stages){
+    const s=result.stages;
+    if(s.checkout)panel.appendChild(row('cs_live',s.checkout.cs_live||'-'));
+    if(s.provider)panel.appendChild(row('Provider',s.provider.status||'-'));
+    if(s.approve)panel.appendChild(row('Approve',s.approve.ok?'OK':'FAIL'));
+  }
+}
+
+function row(k,v){
+  const r=document.createElement('div');r.style.cssText='margin-bottom:4px';
+  const ke=document.createElement('span');ke.style.cssText='color:var(--muted);font-size:12px';ke.textContent=k+': ';
+  const ve=document.createElement('span');ve.style.cssText='font-size:13px;word-break:break-all';ve.textContent=v;
+  r.appendChild(ke);r.appendChild(ve);
+  return r;
+}
+
+function closeStream(){
+  if(state.es){try{state.es.close();}catch(_){}state.es=null;}
+}
+
+function connectStream(jobId){
+  closeStream();
+  const es=new EventSource('/api/jobs/'+jobId+'/events');
+  state.es=es;
+  es.onmessage=(e)=>{
+    let evt;
+    try{evt=JSON.parse(e.data);}catch(_){return;}
+    handleEvent(evt);
+  };
+  es.onerror=()=>{
+    if(document.querySelector('.status.running'))
+      appendLog('(连接中断,等待自动重连)','warn');
+  };
+  es.addEventListener('timeout',()=>{
+    appendLog('(服务端超时关闭流)','warn');
+    closeStream();
+  });
+}
+
+function handleEvent(evt){
+  switch(evt.type){
+    case'log':
+      appendLog(evt.msg||'',classifyLog(evt.msg||''));
+      break;
+    case'otp_needed':
+      setStatus('等待 OTP','waiting');
+      els.otpPanel.classList.remove('hidden');
+      els.otpPhone.textContent=evt.phone||'';
+      els.otpInput.value='';
+      els.otpInput.focus();
+      appendLog('需要短信 OTP: '+(evt.phone||''),'warn');
+      break;
+    case'result':
+      state.lastResult=evt.result||null;
+      showResult(evt.result);
+      if(evt.result&&evt.result.success)setStatus('成功','ok');
+      else setStatus('失败','error');
+      els.otpPanel.classList.add('hidden');
+      refreshStats();
+      break;
+    case'done':
+      state.jobRunning=false;
+      syncRetryButton();
+      closeStream();
+      refreshStats();
+      break;
+  }
+}
+
+async function startJob(body,opts){
+  opts=opts||{};
+  const isRetry=!!opts.retry;
+  if(!body.input){alert('Access Token 不能为空');return;}
+
+  state.lastBody=Object.assign({},body);
+  state.lastResult=null;
+  state.jobRunning=true;
+  syncRetryButton();
+  if(!isRetry)persistForm();
+
+  if(isRetry){
+    els.retryBtn.disabled=true;
+    setStatus('重试启动中…','running');
+  }else{
+    els.submitBtn.disabled=true;
+    setStatus('启动中…','running');
+  }
+  try{
+    const data=await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});
+    state.jobId=data.job_id;
+    showRunCard(data.job_id);
+    setStatus('执行中','running');
+    appendLog((isRetry?'重试':'任务')+' #'+data.job_id.slice(0,8)+' 已创建');
+    appendLog('4阶段流程: ①创建Checkout(JP) → ②Stripe/PayPal(US) → ③Approve(JP) → ④提取BA链');
+    connectStream(data.job_id);
+  }catch(err){
+    state.jobRunning=false;
+    syncRetryButton();
+    setStatus(isRetry?'重试失败':'启动失败','error');
+    alert((isRetry?'重试失败: ':'启动失败: ')+err.message);
+  }finally{
+    els.submitBtn.disabled=false;
+  }
+}
+
+els.form.addEventListener('submit',async(e)=>{
+  e.preventDefault();
+  const body={
+    input:els.fInput.value.trim(),
+    proxy:els.fProxy.value.trim(),
+    proxy_jp:els.fProxyJP.value.trim(),
+  };
+  await startJob(body,{retry:false});
+});
+
+els.resetBtn.addEventListener('click',()=>{
+  closeStream();
+  state.jobId=null;state.jobRunning=false;state.lastResult=null;
+  els.runCard.classList.add('hidden');els.formCard.classList.remove('hidden');
+  els.log.innerHTML='';els.resultPanel.classList.add('hidden');els.otpPanel.classList.add('hidden');
+  syncRetryButton();setStatus('就绪');
+});
+
+els.clearLogBtn.addEventListener('click',()=>{els.log.innerHTML='';});
+
+els.retryBtn.addEventListener('click',async()=>{
+  if(!state.lastBody||state.jobRunning)return;
+  const body={
+    input:state.lastBody.input,
+    proxy:els.fProxy.value.trim(),
+    proxy_jp:els.fProxyJP.value.trim(),
+  };
+  await startJob(body,{retry:true});
+});
+
+els.proxyBtns.forEach(btn=>{
+  btn.onclick=function(){
+    var targetId=this.getAttribute('data-target');
+    var input=document.getElementById(targetId);
+    var out=document.getElementById(targetId+'-result');
+    var url=(input.value||'').trim();
+    if(!url){out.className='proxy-result err';out.textContent='代理为空';return;}
+    this.disabled=true;
+    out.className='proxy-result busy';out.textContent='检测中...';
+    fetch('/api/check-proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proxy:url})})
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.ok){
+        var parts=[data.ip||'','延迟:'+(data.latency_ms!=null?data.latency_ms+'ms':'?')].filter(Boolean);
+        out.className='proxy-result ok';out.textContent='出口IP: '+parts.join(' ... ');
+      }else{
+        out.className='proxy-result err';out.textContent=(data.error||'错误');
+      }
+    })
+    .catch(function(err){out.className='proxy-result err';out.textContent=err.message;})
+    .finally(function(){btn.disabled=false;});
+  };
+});
+
+els.otpForm.addEventListener('submit',async(e)=>{
+  e.preventDefault();
+  if(!state.jobId)return;
+  const pin=els.otpInput.value.trim();
+  if(!pin)return;
+  try{
+    await api('/api/jobs/'+state.jobId+'/otp',{method:'POST',body:JSON.stringify({pin})});
+    els.otpPanel.classList.add('hidden');
+    setStatus('执行中','running');
+    appendLog('OTP 已提交');
+  }catch(err){alert('OTP 提交失败: '+err.message);}
+});
+
+(async function init(){
+  restoreForm();
+  try{state.config=await fetch('/api/config').then(r=>r.json());}catch(_){}
+  refreshStats();
+  setInterval(refreshStats,5000);
+})();
+
+async function refreshStats(){
+  try{
+    const s=await fetch('/api/stats').then(r=>r.json());
+    const fmt=(n)=>(typeof n==='number')?n.toLocaleString():'—';
+    $('s-visitors').textContent=fmt(s.visitors);
+    $('s-pplink').textContent=fmt(s.pplink_success);
+    $('s-active-jobs').textContent=fmt(s.active_jobs);
+    state.uptimeSec=(typeof s.uptime_sec==='number')?s.uptime_sec:null;
+    renderUptime();startUptimeTicker();
+  }catch(_){}
+}
+})();
+</script>
+</body>
+</html>

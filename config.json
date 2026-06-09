@@ -1,0 +1,15 @@
+{
+  "jp_proxy": "http://ghn844311-region-JP-sid-7MsRqhD3-t-5:5cs9grhd@us.1024proxy.io:3000",
+  "us_proxy": "http://ghn844311-region-US-sid-aMDt4jmw-t-5:5cs9grhd@us.1024proxy.io:3000",
+  "billing_address": {
+    "country": "US",
+    "line1": "123 Main Street",
+    "city": "New York",
+    "state": "NY",
+    "postal_code": "10001"
+  },
+  "chatgpt_base": "https://chatgpt.com",
+  "auth_base": "https://auth.openai.com",
+  "poll_interval": 2,
+  "poll_max_attempts": 30
+}
